@@ -1,0 +1,1 @@
+Add-Content -Path c:\DateTimeFile1.log -Value (Get-Date)
