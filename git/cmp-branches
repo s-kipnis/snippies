@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 3 ]; then
+  echo "Usage: $0 <source_branch> <target_branch> <author>"
+  echo "Example: $0 2.5.0 master \"Sergey Kipnis\""
+  exit 1
+fi
+
+branch="$1"
+branch_tgt="$2"
+author="$3"
+
+git rev-parse --verify "$branch" >/dev/null 2>&1 || {
+  echo "Error: branch '$branch' does not exist"
+  exit 2
+}
+
+git rev-parse --verify "$branch_tgt" >/dev/null 2>&1 || {
+  echo "Error: branch '$branch_tgt' does not exist"
+  exit 2
+}
+
+# ---- main logic ------------------------------------------------------
+
+git log \
+  --left-right \
+  --cherry \
+  --oneline \
+  --decorate \
+  --author="$author" \
+  "${branch}...${branch_tgt}"
