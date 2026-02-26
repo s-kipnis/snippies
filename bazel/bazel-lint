@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: bazel-lint <file-or-directory>
+
+- Argument may be a file, a directory, or "."
+- Finds Bazel repo root (git / WORKSPACE / MODULE.bazel)
+- Ensures path is inside the repo
+- Walks up from the path to find nearest BUILD or BUILD.bazel
+- Runs: bazel lint //<package>...
+EOF
+  exit 2
+}
+
+[[ $# -eq 1 ]] || usage
+input="$1"
+
+# Resolve to absolute path
+if command -v realpath >/dev/null 2>&1; then
+  path_abs="$(realpath -m -- "$input" 2>/dev/null || true)"
+else
+  path_abs="$(cd "$(dirname -- "$input")" && pwd)/$(basename -- "$input")"
+fi
+
+[[ -e "$path_abs" ]] || die "Path does not exist: $input"
+
+# If directory → use it; if file → use its directory
+if [[ -d "$path_abs" ]]; then
+  start_dir="$path_abs"
+else
+  start_dir="$(dirname -- "$path_abs")"
+fi
+
+# Find repo root
+repo_root=""
+if command -v git >/dev/null 2>&1; then
+  repo_root="$(git -C "$start_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+
+if [[ -z "$repo_root" ]]; then
+  # Fallback: search upwards for Bazel root markers
+  d="$start_dir"
+  while :; do
+    if [[ -f "$d/WORKSPACE" || -f "$d/WORKSPACE.bazel" || -f "$d/MODULE.bazel" ]]; then
+      repo_root="$d"
+      break
+    fi
+    [[ "$d" == "/" ]] && break
+    d="$(dirname -- "$d")"
+  done
+fi
+
+[[ -n "$repo_root" ]] || die "Repo root not found (git/WORKSPACE/MODULE.bazel)."
+
+# Normalize repo_root
+if command -v realpath >/dev/null 2>&1; then
+  repo_root="$(realpath -m -- "$repo_root")"
+else
+  repo_root="$(cd "$repo_root" && pwd)"
+fi
+
+# Ensure path is inside repo
+case "$path_abs" in
+  "$repo_root"/*|"$repo_root") ;;
+  *) die "Path is not inside repo root: $path_abs (repo: $repo_root)" ;;
+esac
+
+# Walk up to find nearest BUILD/BUILD.bazel
+cur_dir="$start_dir"
+build_file=""
+
+while :; do
+  if [[ -f "$cur_dir/BUILD.bazel" ]]; then
+    build_file="$cur_dir/BUILD.bazel"
+    break
+  elif [[ -f "$cur_dir/BUILD" ]]; then
+    build_file="$cur_dir/BUILD"
+    break
+  fi
+
+  [[ "$cur_dir" == "$repo_root" ]] && break
+  cur_dir="$(dirname -- "$cur_dir")"
+done
+
+[[ -n "$build_file" ]] || die "No BUILD or BUILD.bazel found from $start_dir up to $repo_root"
+
+# Compute package path relative to repo root
+pkg_dir="$(dirname -- "$build_file")"
+
+if [[ "$pkg_dir" == "$repo_root" ]]; then
+  bazel_pkg="//..."
+else
+  pkg_rel="${pkg_dir#"$repo_root"/}"
+  bazel_pkg="//$pkg_rel/..."
+fi
+
+echo "Repo root : $repo_root"
+echo "Input     : $path_abs"
+echo "BUILD file: $build_file"
+echo "Package   : $bazel_pkg"
+
+tmp_out1="$(mktemp -t bazel-lint.XXXXXX)"
+tmp_out2="$(mktemp -t bazel-lint.XXXXXX)"
+bazel lint --interactive=no --quiet --fixes --diff -k --report=no "$bazel_pkg" 1>"$tmp_out1"  2>/dev/null
+# If output is empty => success (exit 0), regardless of bazel_rc.
+# If output is non-empty => show it and exit 1.
+if [[ ! -s "$tmp_out1" ]]; then
+  echo SUCCESS!
+  exit 0
+fi
+
+echo ERRORS:
+cat -- "$tmp_out1" >&2
+exit 1
